@@ -148,10 +148,10 @@ class model(nn.Module):
         self.e_total = (torch.sum(self.rho_list) + 1/2*torch.sum(self.pe_list)).detach()
 
 
-def train(model, path_save, dt, temp_given, alpha, device=None, n = 1000):
+def train(model_, path_save, dt, temp_given, alpha, device=None, n = 1000):
 
-    # writer = SummaryWriter(log_dir = path_save)
-    length = len(model.weights)
+    writer = SummaryWriter(log_dir = path_save)
+    length = len(model_.weights)
     k_b = constants.k
     ev_j = constants.physical_constants['atomic unit of charge'][0]
     ''' 
@@ -160,36 +160,31 @@ def train(model, path_save, dt, temp_given, alpha, device=None, n = 1000):
     e_total: eV
     kinetic, potential energy in Tensorboard: eV
     '''
-    # model.grad_calc()
 
     for i in range(n):
         #* Step 1
-        model.grad_calc()
-
-        model.acc_list *= (ev_j*1e20) #* eV -> J
+        model_.grad_calc()
+        model_.acc_list *= (ev_j*1e20) #* eV -> J
         with torch.no_grad():
-            model.weights += (model.v_list*dt + 1/2*model.acc_list*dt**2) #* x-step
-        model.v_list += 1/2*model.acc_list*dt
-        model.v_list -= torch.sum(model.v_list, 0)/length
+            model_.weights += (model_.v_list*dt + 1/2*model_.acc_list*dt**2) #* x-step
+        model_.v_list += 1/2*model_.acc_list*dt
+        model_.v_list -= torch.sum(model_.v_list, 0)/length
 
         #* Step 2
-        model.grad_calc()
-
-        model.acc_list *= (ev_j*1e20)
-        model.v_list += 1/2*model.acc_list*dt
-        model.v_list -= torch.sum(model.v_list, 0)/length
-        k_e_ = 1/2*torch.sum(model.mass.reshape(-1,1)*(model.v_list*1e-10)**2)
+        model_.grad_calc()
+        model_.acc_list *= (ev_j*1e20)
+        model_.v_list += 1/2*model_.acc_list*dt
+        model_.v_list -= torch.sum(model_.v_list, 0)/length
+        k_e_ = 1/2*torch.sum(model_.mass.reshape(-1,1)*(model_.v_list*1e-10)**2)
         temp_ = k_e_/(3/2*(length-1))/k_b
 
-        # writer.add_scalar("Potential energy", model.e_total, i)
-        # writer.add_scalar("Kinetic energy", k_e_/ev_j, i)
-        # writer.add_scalar("Temperature", temp_, i)
+        writer.add_scalar("Potential energy", model_.e_total, i)
+        writer.add_scalar("Kinetic energy", k_e_/ev_j, i)
+        writer.add_scalar("Temperature", temp_, i)
 
         if i%100 == 0:
             s_adjust = torch.sqrt((temp_given+(temp_-temp_given)*alpha)/temp_)
-            model.v_list *= s_adjust
-
-            print(i)
+            model_.v_list *= s_adjust
         
 
             # clear_output(True)
