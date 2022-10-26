@@ -11,6 +11,8 @@ import time
 from torch.profiler import profile, record_function, ProfilerActivity
 from scipy import constants
 import sys
+import concurrent.futures
+import torch.multiprocessing as tmp
 from torch.utils.tensorboard import SummaryWriter
 
 def supercell_gen(cell_num1, cell_num2):
@@ -36,7 +38,7 @@ class model(nn.Module):
         f_n0, f_n1, f_n2, f_n3, f_0, f_1, f_2, f_3, eta, f_e
         '''
         #* row1: x-coord, row2: y-coord
-        self.weights = nn.Parameter(atom_list)
+        self.weights = atom_list
         self.weights_ = self.weights.clone()
         atom_num = len(atom_list)
 
@@ -100,55 +102,69 @@ class model(nn.Module):
         else:
             return f_e*(1-torch.log((rho/rho_s)**eta))*(rho/rho_s)**eta
 
-    def grad_calc(self,):
+    def single_block(self, r_ind):
+        '''
+        Extract each atom block containing the centre i and surronding j.
+        r_ind corresponds to the index of centre atom.
+        '''
+        block = self.ind_block[r_ind]
+        coord_block = self.weights[block]
+        param_block = self.params[block]
+
+        delta_xy = coord_block[:,1]-coord_block[:,0]
+        r_blo = torch.norm(delta_xy, dim=1)
+        #* So this will be the cutoff ~3 NN?
+        effe_r_ind = torch.nonzero(r_blo <= 8.5)
+        r_blo = r_blo[torch.flatten(effe_r_ind)]
+        r_blo.requires_grad_()
+        param_block = param_block[torch.flatten(effe_r_ind)]
+        delta_xy = delta_xy[torch.flatten(effe_r_ind)]
+
+        #* Potential energy
+        
+        fr_0 = self.f_r(r_blo, param_block[:, 0][:, [1, 5, 0, 9]]) #* For f^0(r)
+        fr_1 = self.f_r(r_blo, param_block[:, 1][:, [1, 5, 0, 9]]) #* For f^1(r)
+        phir_0 = self.phi_r(r_blo, param_block[:, 0][:, [6,7,0,4,5,8,9]]) #* For phi^0(r)
+        phir_1 = self.phi_r(r_blo, param_block[:, 1][:, [6,7,0,4,5,8,9]]) #* For phi^1(r)
+        phi_01 = 1/2*(fr_1/fr_0*phir_0 + fr_0/fr_1*phir_1) #* For phi^01
+        p_e_ = torch.sum(phi_01) #* Potential energy term
+
+        #* Electronic density
+        rho_i = torch.sum(self.f_r(r_blo, param_block[:, 1][:, [1, 5, 0, 9]])) #* For f^1(r)
+        f_rho_ = self.f_rho(rho_i, param_block[:, 0][:, [10,11,12,13,14,15,16,17,19,20,2,21,3,18]][0]) #* For F(rho)
+
+        # self.rho_list[r_ind] = f_rho_
+        # self.pe_list[r_ind] = p_e_
+        e_x = f_rho_ + 1/2*p_e_
+
+        e_x.backward(retain_graph = True)
+        acc = torch.sum(r_blo.grad.reshape(-1,1)*delta_xy/r_blo.reshape(-1,1), dim=0)/self.mass[r_ind] #*N*2
+        # self.acc_list[r_ind] = acc
+        r_blo.detach()
+
+        return f_rho_.detach(), p_e_.detach(), acc.detach(), r_ind
+
+    def grad_calc(self, process_num):
         ''' 
         Calculate the whole energy with keeping gradient
         '''
 
-        for r_ind in self.range:
-            '''
-            Extract each atom block containing the centre i and surronding j.
-            r_ind corresponds to the index of centre atom.
-            '''
-            block = self.ind_block[r_ind]
-            coord_block = self.weights[block]
-            param_block = self.params[block]
+        # with concurrent.futures.ProcessPoolExecutor(max_workers=process_num) as executor:
+        #     outputs = executor.map(self.single_block, self.range)
+        pool = tmp.Pool(processes = process_num)
+        outputs = pool.map(self.single_block, self.range)
 
-            delta_xy = coord_block[:,1]-coord_block[:,0]
-            r_blo = torch.norm(delta_xy, dim=1)
-            #* So this will be the cutoff ~3 NN?
-            effe_r_ind = torch.nonzero(r_blo <= 6)
-            r_blo = r_blo[torch.flatten(effe_r_ind)]
-            r_blo.retain_grad()
-            param_block = param_block[torch.flatten(effe_r_ind)]
-            delta_xy = delta_xy[torch.flatten(effe_r_ind)]
-
-            #* Potential energy
-            
-            fr_0 = self.f_r(r_blo, param_block[:, 0][:, [1, 5, 0, 9]]) #* For f^0(r)
-            fr_1 = self.f_r(r_blo, param_block[:, 1][:, [1, 5, 0, 9]]) #* For f^1(r)
-            phir_0 = self.phi_r(r_blo, param_block[:, 0][:, [6,7,0,4,5,8,9]]) #* For phi^0(r)
-            phir_1 = self.phi_r(r_blo, param_block[:, 1][:, [6,7,0,4,5,8,9]]) #* For phi^1(r)
-            phi_01 = 1/2*(fr_1/fr_0*phir_0 + fr_0/fr_1*phir_1) #* For phi^01
-            p_e_ = torch.sum(phi_01) #* Potential energy term
-
-            #* Electronic density
-            rho_i = torch.sum(self.f_r(r_blo, param_block[:, 1][:, [1, 5, 0, 9]])) #* For f^1(r)
-            f_rho_ = self.f_rho(rho_i, param_block[:, 0][:, [10,11,12,13,14,15,16,17,19,20,2,21,3,18]][0]) #* For F(rho)
-
-            self.rho_list[r_ind] = f_rho_
-            self.pe_list[r_ind] = p_e_
-            e_x = f_rho_ + 1/2*p_e_
-
-            e_x.backward(retain_graph = True)
-            acc = torch.sum(r_blo.grad.reshape(-1,1)*delta_xy/r_blo.reshape(-1,1), dim=0)/self.mass[r_ind] #*N*2
-            self.acc_list[r_ind] = acc
+        for output in outputs:
+            ind = output[-1]
+            self.rho_list[ind] = output[0]
+            self.pe_list[ind] = output[1]
+            self.acc_list[ind] = output[2]
 
         # print(p_e, self.rho_list)
-        self.e_total = (torch.sum(self.rho_list) + 1/2*torch.sum(self.pe_list)).detach()
+        self.e_total = torch.sum(self.rho_list) + 1/2*torch.sum(self.pe_list)
 
 
-def train(model_, path_save, dt, temp_given, alpha, device=None, n = 1000):
+def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b, n_core=12, device=None, n = 1000):
 
     writer = SummaryWriter(log_dir = path_save)
     length = len(model_.weights)
@@ -163,15 +179,16 @@ def train(model_, path_save, dt, temp_given, alpha, device=None, n = 1000):
 
     for i in range(n):
         #* Step 1
-        model_.grad_calc()
+        model_.grad_calc(n_core)
         model_.acc_list *= (ev_j*1e20) #* eV -> J
         with torch.no_grad():
             model_.weights += (model_.v_list*dt + 1/2*model_.acc_list*dt**2) #* x-step
+            model_.weights = clamp(lo_b, up_b, model_.weights)
         model_.v_list += 1/2*model_.acc_list*dt
         model_.v_list -= torch.sum(model_.v_list, 0)/length
 
         #* Step 2
-        model_.grad_calc()
+        model_.grad_calc(n_core)
         model_.acc_list *= (ev_j*1e20)
         model_.v_list += 1/2*model_.acc_list*dt
         model_.v_list -= torch.sum(model_.v_list, 0)/length
@@ -185,6 +202,8 @@ def train(model_, path_save, dt, temp_given, alpha, device=None, n = 1000):
         if i%100 == 0:
             s_adjust = torch.sqrt((temp_given+(temp_-temp_given)*alpha)/temp_)
             model_.v_list *= s_adjust
+
+            print(i)
         
 
             # clear_output(True)
@@ -199,8 +218,8 @@ if __name__ == '__main__':
     ''' 
     Generate the primary CoNi cell in planar FCC lattice
     '''
-    x_extend, y_extend = 3, 3
-    r_equ = 2.49255140368258
+    x_extend, y_extend = 5, 5
+    r_equ = 2.363925
     cell = supercell_gen(x_extend, y_extend)
     cell_t = np.array(cell, dtype=bool)
     init_weight = np.array([math.sqrt(3)/2*r_equ, 1/2*r_equ])
@@ -209,13 +228,34 @@ if __name__ == '__main__':
 
     if use_relax:
         coord = np.load('/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD/2D_try/EAM/runs/20221026_relaxweight.npy')
+        coord -= coord[0] #* Normalization
 
-    coord = torch.from_numpy(coord.astype(np.float32)).clone().requires_grad_()
+    coord = torch.from_numpy(coord.astype(np.float32)).clone()
     atom_num = len(coord)
     atom_dim = coord.size(1)
 
     n_co = atom_num//2
     n_ni = atom_num - n_co
+
+    ''' 
+    Set upper and lower bound for matrix
+    '''
+    x_upper, x_lower = (x_extend+1/2)*r_equ*math.sqrt(3), -(1/2)*r_equ*math.sqrt(3)
+    y_upper, y_lower = (y_extend+1/2)*r_equ, -(1/2)*r_equ
+
+    x_u = torch.ones(atom_num)*x_upper
+    x_l = torch.ones(atom_num)*x_lower
+
+    y_u = torch.ones(atom_num)*y_upper
+    y_l = torch.ones(atom_num)*y_lower
+
+    xy_l = torch.cat((x_l.reshape(-1,1), y_l.reshape(-1,1)), dim=1).long()
+    xy_u = torch.cat((x_u.reshape(-1,1), y_u.reshape(-1,1)), dim=1).long()
+
+    def clamp(lo_b, up_b, a):
+        a = torch.where(a > lo_b, a, a+up_b-lo_b)
+        a = torch.where(a < up_b, a, a-up_b+lo_b)
+        return a
 
     ''' 
     Embed the corresponding params, also determines the atom specie
@@ -264,7 +304,7 @@ if __name__ == '__main__':
 
     localtime = time.localtime(time.time())
     yr_, m_, d_ = localtime[:3]
-    date = f'{yr_}{m_}{d_}'
+    date = f'{yr_}{m_}{d_}_MD'
     pth = f'/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD/2D_try/EAM/runs/{date}'
 
     m = model(coord, param_, mass_, v_list, device).to(device)
@@ -272,8 +312,13 @@ if __name__ == '__main__':
     dt = torch.tensor(1e-15).to(device) #* Time step, 1 fs = 1e-15 s
     alpha = 0.75 #* For temperature adjusting
 
-    train(m, pth, dt, temp, alpha, device, n=10000)
+    #* Main
+    train(m, pth, dt, temp, alpha, xy_l, xy_u, n_core=20, device=device, n=5000)
 
+    #*Store
     weight_ = m.weights.detach().cpu().numpy()
     weight_raw = m.weights_.detach().cpu().numpy()
-    plt.scatter(weight_[:, 0], weight_[:, 1])
+    # plt.scatter(weight_[:, 0], weight_[:, 1])
+    np.save(pth+'/weight.npy', weight_)
+    np.save(pth+'/weight_raw.npy', weight_raw)
+    np.save(pth+'/ele_specie.npy', ele_list)
