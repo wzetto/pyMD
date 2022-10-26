@@ -1,5 +1,3 @@
-import matscipy
-from matscipy import calculators
 import numpy as np
 import math
 import torch
@@ -190,6 +188,8 @@ def train(model, path_save, dt, temp_given, alpha, device=None, n = 1000):
         if i%100 == 0:
             s_adjust = torch.sqrt((temp_given+(temp_-temp_given)*alpha)/temp_)
             model.v_list *= s_adjust
+
+            print(i)
         
 
             # clear_output(True)
@@ -255,7 +255,6 @@ if __name__ == '__main__':
     param_ = torch.matmul(ele_list, p_nico)
     mass_ = torch.flatten(torch.matmul(ele_list, m_nico))
 
-
     #* Velocity
     temp = 200
     k_b = constants.k
@@ -278,15 +277,7 @@ if __name__ == '__main__':
     dt = torch.tensor(1e-15).to(device) #* Time step, 1 fs = 1e-15 s
     alpha = 0.75 #* For temperature adjusting
 
-    train(m, pth, dt, temp, alpha, device, n=1000)
-
-
-
-
-
-
-
-
+    train(m, pth, dt, temp, alpha, device, n=10000)
 
     weight_ = m.weights.detach().cpu().numpy()
     weight_raw = m.weights_.detach().cpu().numpy()
