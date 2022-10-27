@@ -10,10 +10,17 @@ from itertools import combinations
 import time
 from torch.profiler import profile, record_function, ProfilerActivity
 from scipy import constants
-import sys
-import concurrent.futures
+import os
 import torch.multiprocessing as tmp
 from torch.utils.tensorboard import SummaryWriter
+
+def create_dir(directory):
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+        print("Created Directory : ", directory)
+    else:
+        print("Directory already existed : ", directory)
+    return directory
 
 def supercell_gen(cell_num1, cell_num2):
     atom_pos1 = cell_num1*2 + 1
@@ -167,6 +174,7 @@ class model(nn.Module):
 def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b, n_core=12, device=None, n = 1000):
 
     writer = SummaryWriter(log_dir = path_save)
+    create_dir(path_save+'/config')
     length = len(model_.weights)
     k_b = constants.k
     ev_j = constants.physical_constants['atomic unit of charge'][0]
@@ -195,6 +203,13 @@ def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b, n_core=12, devic
         k_e_ = 1/2*torch.sum(model_.mass.reshape(-1,1)*(model_.v_list*1e-10)**2)
         temp_ = k_e_/(3/2*(length-1))/k_b
 
+        #* Load status of config.
+        clear_output(True)
+        weight_ = m.weights.detach().cpu().numpy()
+        fig, ax = plt.subplots()
+        plt.scatter(weight_[:, 0], weight_[:, 1])
+        fig.savefig(path_save+f'/config/{i}.png',)
+
         writer.add_scalar("Potential energy", model_.e_total, i)
         writer.add_scalar("Kinetic energy", k_e_/ev_j, i)
         writer.add_scalar("Temperature", temp_, i)
@@ -204,7 +219,6 @@ def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b, n_core=12, devic
             model_.v_list *= s_adjust
 
             print(i)
-        
 
             # clear_output(True)
 
@@ -227,7 +241,7 @@ if __name__ == '__main__':
                             np.where(cell_t)[1].reshape(-1,1)], 1)*init_weight
 
     if use_relax:
-        coord = np.load('/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD/2D_try/EAM/runs/20221026_relaxweight.npy')
+        coord = np.load('/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD/2D_try/EAM/runs/20221026_relax/weight_5_5.npy')
         coord -= coord[0] #* Normalization
 
     coord = torch.from_numpy(coord.astype(np.float32)).clone()
@@ -281,7 +295,7 @@ if __name__ == '__main__':
     shuffle_i = torch.randperm(ele_list.size(0))
     ele_list = ele_list[shuffle_i]
     if use_relax:
-        ele_list = np.load('/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD/2D_try/EAM/runs/20221026_relaxele_list.npy')
+        ele_list = np.load('/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD/2D_try/EAM/runs/20221026_relax/ele_list_5_5.npy')
         ele_list = torch.from_numpy(ele_list.astype(np.float32))
 
     #* Execution
@@ -291,9 +305,9 @@ if __name__ == '__main__':
     mass_ = torch.flatten(torch.matmul(ele_list, m_nico))
 
     #* Velocity
-    temp = 200
+    temp = 77
     k_b = constants.k
-    v_list = torch.rand(atom_num, atom_dim)*torch.sqrt(3*(1-1/atom_dim)*k_b*temp/mass_.reshape(-1,1))*1e10
+    v_list = (torch.rand(atom_num, atom_dim)*4-2)*torch.sqrt(3*(1-1/atom_dim)*k_b*temp/mass_.reshape(-1,1))*1e10
     v_list -= torch.sum(v_list, 0)/atom_num
 
     #* To device
@@ -313,7 +327,7 @@ if __name__ == '__main__':
     alpha = 0.75 #* For temperature adjusting
 
     #* Main
-    train(m, pth, dt, temp, alpha, xy_l, xy_u, n_core=20, device=device, n=5000)
+    train(m, pth, dt, temp, alpha, xy_l, xy_u, n_core=22, device=device, n=10000)
 
     #*Store
     weight_ = m.weights.detach().cpu().numpy()
