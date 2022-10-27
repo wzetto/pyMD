@@ -174,7 +174,7 @@ class model(nn.Module):
 def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b, n_core=12, device=None, n = 1000):
 
     writer = SummaryWriter(log_dir = path_save)
-    create_dir(path_save+'/config')
+    create_dir(path_save+'/.gitignore')
     length = len(model_.weights)
     k_b = constants.k
     ev_j = constants.physical_constants['atomic unit of charge'][0]
@@ -208,7 +208,11 @@ def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b, n_core=12, devic
         weight_ = m.weights.detach().cpu().numpy()
         fig, ax = plt.subplots()
         plt.scatter(weight_[:, 0], weight_[:, 1])
-        fig.savefig(path_save+f'/config/{i}.png',)
+        plt.xlim(-2, 23.5)
+        plt.ylim(-2, 14.5)
+        plt.text(17, 13, f'{i} fs', fontsize=20)
+
+        fig.savefig(path_save+f'/.gitignore/{i}.png',)
 
         writer.add_scalar("Potential energy", model_.e_total, i)
         writer.add_scalar("Kinetic energy", k_e_/ev_j, i)
@@ -222,10 +226,7 @@ def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b, n_core=12, devic
 
             # clear_output(True)
 
-#! Periodic boundary condition
 #! Check latent bug (?)
-#! Memory leak
-
 
 if __name__ == '__main__':
     use_relax = True
