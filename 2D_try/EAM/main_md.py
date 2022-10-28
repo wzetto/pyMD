@@ -211,8 +211,10 @@ def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b, n_core=12, devic
         plt.xlim(-2, 23.5)
         plt.ylim(-2, 14.5)
         plt.text(17, 13, f'{i} fs', fontsize=20)
-
         fig.savefig(path_save+f'/.gitignore/{i}.png',)
+        f = plt.figure()
+        f.clear()
+        plt.close(f)
 
         writer.add_scalar("Potential energy", model_.e_total, i)
         writer.add_scalar("Kinetic energy", k_e_/ev_j, i)
@@ -242,7 +244,7 @@ if __name__ == '__main__':
                             np.where(cell_t)[1].reshape(-1,1)], 1)*init_weight
 
     if use_relax:
-        coord = np.load('/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD/2D_try/EAM/runs/20221026_relax/weight_5_5.npy')
+        coord = np.load('/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD_buffer/EAM_runs/20221026_relax/weight_5_5.npy')
         coord -= coord[0] #* Normalization
 
     coord = torch.from_numpy(coord.astype(np.float32)).clone()
@@ -296,7 +298,7 @@ if __name__ == '__main__':
     shuffle_i = torch.randperm(ele_list.size(0))
     ele_list = ele_list[shuffle_i]
     if use_relax:
-        ele_list = np.load('/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD/2D_try/EAM/runs/20221026_relax/ele_list_5_5.npy')
+        ele_list = np.load('/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD_buffer/EAM_runs/20221026_relax/ele_list_5_5.npy')
         ele_list = torch.from_numpy(ele_list.astype(np.float32))
 
     #* Execution
@@ -320,7 +322,7 @@ if __name__ == '__main__':
     localtime = time.localtime(time.time())
     yr_, m_, d_ = localtime[:3]
     date = f'{yr_}{m_}{d_}_MD'
-    pth = f'/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD/2D_try/EAM/runs/{date}'
+    pth = f'/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD_buffer/EAM_runs/{date}'
 
     m = model(coord, param_, mass_, v_list, device).to(device)
 
