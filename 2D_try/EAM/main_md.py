@@ -12,6 +12,7 @@ from torch.profiler import profile, record_function, ProfilerActivity
 from scipy import constants
 import os
 import torch.multiprocessing as tmp
+import gc
 from torch.utils.tensorboard import SummaryWriter
 
 def create_dir(directory):
@@ -144,10 +145,17 @@ class model(nn.Module):
         # self.pe_list[r_ind] = p_e_
         e_x = f_rho_ + 1/2*p_e_
 
-        e_x.backward(retain_graph = True)
+        e_x.backward()
         acc = torch.sum(r_blo.grad.reshape(-1,1)*delta_xy/r_blo.reshape(-1,1), dim=0)/self.mass[r_ind] #*N*2
         # self.acc_list[r_ind] = acc
         r_blo.detach()
+        e_x.detach()
+        
+        #* Delete variables
+        del r_blo
+        del e_x
+        del delta_xy
+        gc.collect()
 
         return f_rho_.detach(), p_e_.detach(), acc.detach(), r_ind
 
@@ -158,11 +166,20 @@ class model(nn.Module):
 
         # with concurrent.futures.ProcessPoolExecutor(max_workers=process_num) as executor:
         #     outputs = executor.map(self.single_block, self.range)
-        pool = tmp.Pool(processes = process_num)
-        outputs = pool.map(self.single_block, self.range)
 
-        for output in outputs:
-            ind = output[-1]
+        # pool = tmp.Pool(processes = process_num)
+        # outputs = pool.map(self.single_block, self.range)
+        # pool.close()
+        # pool.join()
+
+        # for output in outputs:
+        #     ind = output[-1]
+        #     self.rho_list[ind] = output[0]
+        #     self.pe_list[ind] = output[1]
+        #     self.acc_list[ind] = output[2]
+
+        for ind in self.range:
+            output = self.single_block(ind)
             self.rho_list[ind] = output[0]
             self.pe_list[ind] = output[1]
             self.acc_list[ind] = output[2]
@@ -171,13 +188,15 @@ class model(nn.Module):
         self.e_total = torch.sum(self.rho_list) + 1/2*torch.sum(self.pe_list)
 
 
-def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b, n_core=12, device=None, n = 1000):
+def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b, 
+    ind_co, ind_ni, n_core=12, device=None, n = 1000):
 
     writer = SummaryWriter(log_dir = path_save)
     create_dir(path_save+'/.gitignore')
     length = len(model_.weights)
     k_b = constants.k
     ev_j = constants.physical_constants['atomic unit of charge'][0]
+    ind_co, ind_ni = ind_co.numpy(), ind_ni.numpy()
     ''' 
     v_list: angstrom / s
     acc: angstrom / s^2
@@ -192,25 +211,29 @@ def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b, n_core=12, devic
         with torch.no_grad():
             model_.weights += (model_.v_list*dt + 1/2*model_.acc_list*dt**2) #* x-step
             model_.weights = clamp(lo_b, up_b, model_.weights)
-        model_.v_list += 1/2*model_.acc_list*dt
         model_.v_list -= torch.sum(model_.v_list, 0)/length
+        model_.v_list += 1/2*model_.acc_list*dt
 
         #* Step 2
         model_.grad_calc(n_core)
         model_.acc_list *= (ev_j*1e20)
-        model_.v_list += 1/2*model_.acc_list*dt
         model_.v_list -= torch.sum(model_.v_list, 0)/length
+        model_.v_list += 1/2*model_.acc_list*dt
         k_e_ = 1/2*torch.sum(model_.mass.reshape(-1,1)*(model_.v_list*1e-10)**2)
         temp_ = k_e_/(3/2*(length-1))/k_b
 
         #* Load status of config.
         clear_output(True)
         weight_ = m.weights.detach().cpu().numpy()
-        fig, ax = plt.subplots()
-        plt.scatter(weight_[:, 0], weight_[:, 1])
-        plt.xlim(-2, 23.5)
-        plt.ylim(-2, 14.5)
-        plt.text(17, 13, f'{i} fs', fontsize=20)
+        fig, ax = plt.subplots(figsize=(17.3, 10))
+        weight_co = weight_[ind_co]
+        weight_ni = weight_[ind_ni]
+
+        plt.scatter(weight_co[:, 0], weight_co[:, 1], c = '#150050', s=100)
+        plt.scatter(weight_ni[:, 0], weight_ni[:, 1], c = '#FB2576', s=100)
+        plt.xlim(-4, 90.5)
+        plt.ylim(-3, 53.5)
+        plt.text(-1, 50.5, f'Ni-Co | {temp} K | {i} fs', fontsize=25)
         fig.savefig(path_save+f'/.gitignore/{i}.png',)
         f = plt.figure()
         f.clear()
@@ -220,23 +243,20 @@ def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b, n_core=12, devic
         writer.add_scalar("Kinetic energy", k_e_/ev_j, i)
         writer.add_scalar("Temperature", temp_, i)
 
-        if i%100 == 0:
+        if i%10 == 0:
             s_adjust = torch.sqrt((temp_given+(temp_-temp_given)*alpha)/temp_)
             model_.v_list *= s_adjust
 
-            print(i)
-
             # clear_output(True)
 
-#! Check latent bug (?)
+        if i % n//4 == 0 and i != 0:
+            temp_given += 200
 
-if __name__ == '__main__':
-    use_relax = True
-    ''' 
-    Generate the primary CoNi cell in planar FCC lattice
-    '''
-    x_extend, y_extend = 5, 5
-    r_equ = 2.363925
+''' 
+Generate the primary CoNi cell in planar FCC lattice
+'''
+def coord_gen(x_extend=20, y_extend=20, r_equ=2.390627, use_relax=False, 
+    pth = None):
     cell = supercell_gen(x_extend, y_extend)
     cell_t = np.array(cell, dtype=bool)
     init_weight = np.array([math.sqrt(3)/2*r_equ, 1/2*r_equ])
@@ -244,7 +264,7 @@ if __name__ == '__main__':
                             np.where(cell_t)[1].reshape(-1,1)], 1)*init_weight
 
     if use_relax:
-        coord = np.load('/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD_buffer/EAM_runs/20221026_relax/weight_5_5.npy')
+        coord = np.load(pth)
         coord -= coord[0] #* Normalization
 
     coord = torch.from_numpy(coord.astype(np.float32)).clone()
@@ -254,9 +274,12 @@ if __name__ == '__main__':
     n_co = atom_num//2
     n_ni = atom_num - n_co
 
-    ''' 
-    Set upper and lower bound for matrix
-    '''
+    return coord, atom_num, atom_dim, n_co, n_ni
+
+''' 
+Set upper and lower bound for matrix
+'''
+def bound_settle(x_extend, y_extend, r_equ):
     x_upper, x_lower = (x_extend+1/2)*r_equ*math.sqrt(3), -(1/2)*r_equ*math.sqrt(3)
     y_upper, y_lower = (y_extend+1/2)*r_equ, -(1/2)*r_equ
 
@@ -269,10 +292,49 @@ if __name__ == '__main__':
     xy_l = torch.cat((x_l.reshape(-1,1), y_l.reshape(-1,1)), dim=1).long()
     xy_u = torch.cat((x_u.reshape(-1,1), y_u.reshape(-1,1)), dim=1).long()
 
-    def clamp(lo_b, up_b, a):
-        a = torch.where(a > lo_b, a, a+up_b-lo_b)
-        a = torch.where(a < up_b, a, a-up_b+lo_b)
-        return a
+    return xy_l, xy_u
+
+def clamp(lo_b, up_b, a):
+    a = torch.where(a > lo_b, a, a+up_b-lo_b)
+    a = torch.where(a < up_b, a, a-up_b+lo_b)
+    return a
+
+''' 
+Determine the specie of elements within atomic list.
+'''
+
+def ele_specie(n_co, n_ni, use_relax=False, pth=None):
+    ele_co = torch.cat((torch.zeros((n_co, 1)), torch.ones((n_co, 1))), dim=1)
+    ele_ni = torch.cat((torch.ones((n_ni, 1)), torch.zeros((n_ni, 1))), dim=1)
+    ele_list = torch.cat((ele_co, ele_ni), dim=0)
+    shuffle_i = torch.randperm(ele_list.size(0))
+    ele_list = ele_list[shuffle_i]
+    if use_relax:
+        ele_list = np.load(pth)
+        ele_list = torch.from_numpy(ele_list.astype(np.float32))
+
+    #* Index of Co and Ni
+    ind_co = torch.flatten(torch.nonzero(ele_list[:,0] == 0))
+    ind_ni = torch.flatten(torch.nonzero(ele_list[:,0] == 1))
+
+    return ele_list, ind_co, ind_ni
+
+#! Check latent bug (?)
+
+if __name__ == '__main__':
+    ''' 
+    Generate the primary CoNi cell in planar FCC lattice
+    '''
+    x_extend, y_extend = 20, 20
+    r_equ = 2.390627
+    coord_pth = '/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD_buffer/EAM_runs/20221028_relax/weight_20_20.npy'
+    coord, atom_num, atom_dim, n_co, n_ni = coord_gen(x_extend=x_extend, y_extend=y_extend, r_equ=r_equ, use_relax=True, 
+        pth = coord_pth)
+
+    ''' 
+    Set upper and lower bound for matrix
+    '''
+    xy_l, xy_u = bound_settle(x_extend, y_extend, r_equ)
 
     ''' 
     Embed the corresponding params, also determines the atom specie
@@ -291,19 +353,9 @@ if __name__ == '__main__':
         [58.6934],
         [58.9332]
     ])*constants.u
-
-    ele_co = torch.cat((torch.zeros((n_co, 1)), torch.ones((n_co, 1))), dim=1)
-    ele_ni = torch.cat((torch.ones((n_ni, 1)), torch.zeros((n_ni, 1))), dim=1)
-    ele_list = torch.cat((ele_co, ele_ni), dim=0)
-    shuffle_i = torch.randperm(ele_list.size(0))
-    ele_list = ele_list[shuffle_i]
-    if use_relax:
-        ele_list = np.load('/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD_buffer/EAM_runs/20221026_relax/ele_list_5_5.npy')
-        ele_list = torch.from_numpy(ele_list.astype(np.float32))
-
-    #* Execution
-    # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    device = torch.device("cpu")
+    
+    ele_pth = '/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD_buffer/EAM_runs/20221028_relax/ele_list_20_20.npy'
+    ele_list, ind_co, ind_ni = ele_specie(n_co, n_ni, use_relax=True, pth=ele_pth)
     param_ = torch.matmul(ele_list, p_nico)
     mass_ = torch.flatten(torch.matmul(ele_list, m_nico))
 
@@ -314,6 +366,8 @@ if __name__ == '__main__':
     v_list -= torch.sum(v_list, 0)/atom_num
 
     #* To device
+    # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
     v_list = v_list.to(device)
     mass_ = mass_.to(device)
     param_ = param_.to(device)
@@ -327,15 +381,16 @@ if __name__ == '__main__':
     m = model(coord, param_, mass_, v_list, device).to(device)
 
     dt = torch.tensor(1e-15).to(device) #* Time step, 1 fs = 1e-15 s
-    alpha = 0.75 #* For temperature adjusting
+    alpha = 0.5 #* For temperature adjusting
 
     #* Main
-    train(m, pth, dt, temp, alpha, xy_l, xy_u, n_core=22, device=device, n=10000)
+    train(m, pth, dt, temp, alpha, xy_l, xy_u, ind_co, ind_ni, 
+        n_core=1, device=device, n=5000)
 
     #*Store
     weight_ = m.weights.detach().cpu().numpy()
     weight_raw = m.weights_.detach().cpu().numpy()
     # plt.scatter(weight_[:, 0], weight_[:, 1])
-    np.save(pth+'/weight.npy', weight_)
-    np.save(pth+'/weight_raw.npy', weight_raw)
-    np.save(pth+'/ele_specie.npy', ele_list)
+    np.save(pth+f'/weight_{x_extend}_{y_extend}.npy', weight_)
+    np.save(pth+f'/weight_raw_{x_extend}_{y_extend}.npy', weight_raw)
+    np.save(pth+f'/ele_list_{x_extend}_{y_extend}.npy', ele_list)
