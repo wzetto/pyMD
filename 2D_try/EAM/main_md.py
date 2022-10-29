@@ -36,7 +36,7 @@ def supercell_gen(cell_num1, cell_num2):
     return zero_cell
 
 class model(nn.Module):
-    def __init__(self, atom_list, param_list, mass_list, v_list, device):
+    def __init__(self, atom_list, param_list, mass_list, v_list, temp, device):
         super().__init__()
         '''
         atom_list: N*dimension
@@ -61,6 +61,8 @@ class model(nn.Module):
         self.acc_list = torch.zeros(atom_num, self.weights.size(1)).to(device)
         self.v_list = v_list
         self.mass = mass_list
+        self.gamma_m1, self.gamma_m05, self.gamma = torch.zeros(3) #* t-1, t-0.5, t
+        self.temp_m1, self.temp_m05, self.temp = torch.ones(3)*temp #* t-1, t-0.5, t
 
         self.range = torch.arange(atom_num).to(device)
         self.params = param_list
@@ -122,7 +124,7 @@ class model(nn.Module):
         delta_xy = coord_block[:,1]-coord_block[:,0]
         r_blo = torch.norm(delta_xy, dim=1)
         #* So this will be the cutoff ~3 NN?
-        effe_r_ind = torch.nonzero(r_blo <= 8.5)
+        effe_r_ind = torch.nonzero(r_blo <= 6)
         r_blo = r_blo[torch.flatten(effe_r_ind)]
         r_blo.requires_grad_()
         param_block = param_block[torch.flatten(effe_r_ind)]
@@ -143,7 +145,7 @@ class model(nn.Module):
 
         # self.rho_list[r_ind] = f_rho_
         # self.pe_list[r_ind] = p_e_
-        e_x = f_rho_ + 1/2*p_e_
+        e_x = f_rho_ + 1/4*p_e_
 
         e_x.backward()
         acc = torch.sum(r_blo.grad.reshape(-1,1)*delta_xy/r_blo.reshape(-1,1), dim=0)/self.mass[r_ind] #*N*2
@@ -185,10 +187,10 @@ class model(nn.Module):
             self.acc_list[ind] = output[2]
 
         # print(p_e, self.rho_list)
-        self.e_total = torch.sum(self.rho_list) + 1/2*torch.sum(self.pe_list)
+        self.e_total = torch.sum(self.rho_list) + torch.sum(self.pe_list)
 
 
-def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b, 
+def train(model_, path_save, dt, temp_given, mu, lo_b, up_b, 
     ind_co, ind_ni, n_core=12, device=None, n = 1000):
 
     writer = SummaryWriter(log_dir = path_save)
@@ -208,19 +210,39 @@ def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b,
         #* Step 1
         model_.grad_calc(n_core)
         model_.acc_list *= (ev_j*1e20) #* eV -> J
+        #* Update of gamma, temp and acc
+        model_.gamma_m1 = model_.gamma_m05
+        model_.gamma_m05 = model_.gamma
+        model_.temp_m1 = model_.temp_m05
+        model_.temp_m05 = model_.temp
+
+        model_.gamma = 2*model_.gamma_m05-model_.gamma_m1+1/2*mu/temp_given*(model_.temp_m05-model_.temp_m1)
+        model_.acc_list -= model_.v_list*mu*model_.gamma
+
         with torch.no_grad():
             model_.weights += (model_.v_list*dt + 1/2*model_.acc_list*dt**2) #* x-step
             model_.weights = clamp(lo_b, up_b, model_.weights)
         model_.v_list -= torch.sum(model_.v_list, 0)/length
         model_.v_list += 1/2*model_.acc_list*dt
+        k_e_ = 1/2*torch.sum(model_.mass.reshape(-1,1)*(model_.v_list*1e-10)**2)
+        model_.temp = k_e_/(3/2*(length-1))/k_b
 
         #* Step 2
         model_.grad_calc(n_core)
         model_.acc_list *= (ev_j*1e20)
+        #* Update of gamma, temp and acc thorugh nose-hoover mothod
+        model_.gamma_m1 = model_.gamma_m05
+        model_.gamma_m05 = model_.gamma
+        model_.temp_m1 = model_.temp_m05
+        model_.temp_m05 = model_.temp
+
+        model_.gamma = 2*model_.gamma_m05-model_.gamma_m1+1/2*mu/temp_given*(model_.temp_m05-model_.temp_m1)
+        model_.acc_list -= model_.v_list*mu*model_.gamma
+
         model_.v_list -= torch.sum(model_.v_list, 0)/length
         model_.v_list += 1/2*model_.acc_list*dt
         k_e_ = 1/2*torch.sum(model_.mass.reshape(-1,1)*(model_.v_list*1e-10)**2)
-        temp_ = k_e_/(3/2*(length-1))/k_b
+        model_.temp = k_e_/(3/2*(length-1))/k_b
 
         #* Load status of config.
         clear_output(True)
@@ -229,11 +251,11 @@ def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b,
         weight_co = weight_[ind_co]
         weight_ni = weight_[ind_ni]
 
-        plt.scatter(weight_co[:, 0], weight_co[:, 1], c = '#150050', s=100)
-        plt.scatter(weight_ni[:, 0], weight_ni[:, 1], c = '#FB2576', s=100)
-        plt.xlim(-4, 90.5)
-        plt.ylim(-3, 53.5)
-        plt.text(-1, 50.5, f'Ni-Co | {temp} K | {i} fs', fontsize=25)
+        plt.scatter(weight_co[:, 0], weight_co[:, 1], c = '#150050', s=200)
+        plt.scatter(weight_ni[:, 0], weight_ni[:, 1], c = '#FB2576', s=200)
+        plt.xlim(-3, 45.5)
+        plt.ylim(-3, 28)
+        plt.text(-1, 26, f'Ni-Co | {int(model_.temp)} K | {i} fs', fontsize=25)
         fig.savefig(path_save+f'/.gitignore/{i}.png',)
         f = plt.figure()
         f.clear()
@@ -241,21 +263,21 @@ def train(model_, path_save, dt, temp_given, alpha, lo_b, up_b,
 
         writer.add_scalar("Potential energy", model_.e_total, i)
         writer.add_scalar("Kinetic energy", k_e_/ev_j, i)
-        writer.add_scalar("Temperature", temp_, i)
+        writer.add_scalar("Temperature", model_.temp, i)
 
-        if i%10 == 0:
-            s_adjust = torch.sqrt((temp_given+(temp_-temp_given)*alpha)/temp_)
-            model_.v_list *= s_adjust
+        # if i%10 == 0:
+        #     s_adjust = torch.sqrt((temp_given+(temp_-temp_given)*alpha)/temp_)
+        #     model_.v_list *= s_adjust
 
             # clear_output(True)
 
-        if i % n//4 == 0 and i != 0:
-            temp_given += 200
+        # if i % n//4 == 0 and i != 0:
+        #     temp_given += 200
 
 ''' 
 Generate the primary CoNi cell in planar FCC lattice
 '''
-def coord_gen(x_extend=20, y_extend=20, r_equ=2.390627, use_relax=False, 
+def coord_gen(x_extend=10, y_extend=10, r_equ=2.390627, use_relax=False, 
     pth = None):
     cell = supercell_gen(x_extend, y_extend)
     cell_t = np.array(cell, dtype=bool)
@@ -325,9 +347,9 @@ if __name__ == '__main__':
     ''' 
     Generate the primary CoNi cell in planar FCC lattice
     '''
-    x_extend, y_extend = 20, 20
-    r_equ = 2.390627
-    coord_pth = '/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD_buffer/EAM_runs/20221028_relax/weight_20_20.npy'
+    x_extend, y_extend = 10, 10
+    r_equ = 2.3804357
+    coord_pth = '/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD_buffer/EAM_runs/20221029_relax/weight_10_10.npy'
     coord, atom_num, atom_dim, n_co, n_ni = coord_gen(x_extend=x_extend, y_extend=y_extend, r_equ=r_equ, use_relax=True, 
         pth = coord_pth)
 
@@ -354,13 +376,13 @@ if __name__ == '__main__':
         [58.9332]
     ])*constants.u
     
-    ele_pth = '/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD_buffer/EAM_runs/20221028_relax/ele_list_20_20.npy'
+    ele_pth = '/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD_buffer/EAM_runs/20221029_relax/ele_list_10_10.npy'
     ele_list, ind_co, ind_ni = ele_specie(n_co, n_ni, use_relax=True, pth=ele_pth)
     param_ = torch.matmul(ele_list, p_nico)
     mass_ = torch.flatten(torch.matmul(ele_list, m_nico))
 
     #* Velocity
-    temp = 77
+    temp = 100
     k_b = constants.k
     v_list = (torch.rand(atom_num, atom_dim)*4-2)*torch.sqrt(3*(1-1/atom_dim)*k_b*temp/mass_.reshape(-1,1))*1e10
     v_list -= torch.sum(v_list, 0)/atom_num
@@ -378,13 +400,13 @@ if __name__ == '__main__':
     date = f'{yr_}{m_}{d_}_MD'
     pth = f'/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD_buffer/EAM_runs/{date}'
 
-    m = model(coord, param_, mass_, v_list, device).to(device)
+    m = model(coord, param_, mass_, v_list, temp, device).to(device)
 
     dt = torch.tensor(1e-15).to(device) #* Time step, 1 fs = 1e-15 s
-    alpha = 0.5 #* For temperature adjusting
+    mu = 0.25 #* For temperature adjusting
 
     #* Main
-    train(m, pth, dt, temp, alpha, xy_l, xy_u, ind_co, ind_ni, 
+    train(m, pth, dt, temp, mu, xy_l, xy_u, ind_co, ind_ni, 
         n_core=1, device=device, n=5000)
 
     #*Store
