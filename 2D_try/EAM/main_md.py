@@ -61,7 +61,7 @@ class model(nn.Module):
         self.acc_list = torch.zeros(atom_num, self.weights.size(1)).to(device)
         self.v_list = v_list
         self.mass = mass_list
-        self.gamma_m1, self.gamma_m05, self.gamma = torch.zeros(3) #* t-1, t-0.5, t
+        self.gamma_m05, self.gamma = torch.zeros(2) #* t-1, t-0.5, t
         self.temp_m1, self.temp_m05, self.temp = torch.ones(3)*temp #* t-1, t-0.5, t
 
         self.range = torch.arange(atom_num).to(device)
@@ -211,12 +211,11 @@ def train(model_, path_save, dt, temp_given, mu, lo_b, up_b,
         model_.grad_calc(n_core)
         model_.acc_list *= (ev_j*1e20) #* eV -> J
         #* Update of gamma, temp and acc
-        model_.gamma_m1 = model_.gamma_m05
         model_.gamma_m05 = model_.gamma
         model_.temp_m1 = model_.temp_m05
         model_.temp_m05 = model_.temp
 
-        model_.gamma = 2*model_.gamma_m05-model_.gamma_m1+1/2*mu/temp_given*(model_.temp_m05-model_.temp_m1)
+        model_.gamma = model_.gamma_m05-mu/2*(model_.temp_m05/temp_given-1)+1/2*mu/temp_given*(model_.temp_m05-model_.temp_m1)
         model_.acc_list -= model_.v_list*mu*model_.gamma
 
         with torch.no_grad():
@@ -231,12 +230,11 @@ def train(model_, path_save, dt, temp_given, mu, lo_b, up_b,
         model_.grad_calc(n_core)
         model_.acc_list *= (ev_j*1e20)
         #* Update of gamma, temp and acc thorugh nose-hoover mothod
-        model_.gamma_m1 = model_.gamma_m05
         model_.gamma_m05 = model_.gamma
         model_.temp_m1 = model_.temp_m05
         model_.temp_m05 = model_.temp
 
-        model_.gamma = 2*model_.gamma_m05-model_.gamma_m1+1/2*mu/temp_given*(model_.temp_m05-model_.temp_m1)
+        model_.gamma = model_.gamma_m05-mu/2*(model_.temp_m05/temp_given-1)+1/2*mu/temp_given*(model_.temp_m05-model_.temp_m1)
         model_.acc_list -= model_.v_list*mu*model_.gamma
 
         model_.v_list -= torch.sum(model_.v_list, 0)/length
@@ -403,7 +401,7 @@ if __name__ == '__main__':
     m = model(coord, param_, mass_, v_list, temp, device).to(device)
 
     dt = torch.tensor(1e-15).to(device) #* Time step, 1 fs = 1e-15 s
-    mu = 0.25 #* For temperature adjusting
+    mu = 1 #* For temperature adjusting
 
     #* Main
     train(m, pth, dt, temp, mu, xy_l, xy_u, ind_co, ind_ni, 
