@@ -347,7 +347,7 @@ if __name__ == '__main__':
     '''
     x_extend, y_extend = 10, 10
     r_equ = 2.3804357
-    coord_pth = '/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD_buffer/EAM_runs/20221029_relax/weight_10_10.npy'
+    coord_pth = './pyMD_buffer/EAM_runs/20221029_relax/weight_10_10.npy'
     coord, atom_num, atom_dim, n_co, n_ni = coord_gen(x_extend=x_extend, y_extend=y_extend, r_equ=r_equ, use_relax=True, 
         pth = coord_pth)
 
@@ -396,7 +396,7 @@ if __name__ == '__main__':
     localtime = time.localtime(time.time())
     yr_, m_, d_ = localtime[:3]
     date = f'{yr_}{m_}{d_}_MD'
-    pth = f'/media/wz/a7ee6d50-691d-431a-8efb-b93adc04896d/Github/pyMD_buffer/EAM_runs/{date}'
+    pth = f'./pyMD_buffer/EAM_runs/{date}'
 
     m = model(coord, param_, mass_, v_list, temp, device).to(device)
 
